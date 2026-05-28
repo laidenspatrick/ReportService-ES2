@@ -1,6 +1,6 @@
 # Report Service Swagger
 
-Repositório de documentação do **Report Service** — sistema Chave (PUCRS/UFRGS).
+Repositório de documentação do **Report Service**.
 
 ## Conteúdo
 
@@ -36,18 +36,6 @@ Abra no navegador:
 ```
 http://localhost:8080
 ```
-
-## Relacionamento com outros serviços
-
-O Report Service consome dados de:
-
-| Serviço               | Dados lidos                                          |
-|-----------------------|------------------------------------------------------|
-| Assessment Service    | Respostas submetidas, avaliações, categorias, níveis |
-| Competency Service    | Competências, subcompetências e seus níveis          |
-| User & Group Service  | Usuários e grupos                                    |
-
-Veja o diagrama de arquitetura do sistema em `assessment_diagram.png` do repositório Assessment Service.
 
 ## Observação
 
