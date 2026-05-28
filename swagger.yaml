@@ -1,0 +1,1236 @@
+openapi: 3.0.3
+
+info:
+  title: Report Service API
+  version: 1.0.0
+  license:
+    name: Academic use only
+    url: https://choosealicense.com/no-permission/
+  description: >
+    API para geração e consulta de relatórios e painel administrativo do sistema
+    Chave — Autoavaliação de Competências para Pessoas Idosas.
+
+    O serviço consolida dados provenientes do Assessment Service, Competency Service
+    e User & Group Service para produzir relatórios individuais, por grupo e por
+    competência, além de oferecer um painel administrativo com estatísticas globais.
+
+    Todos os endpoints exigem autenticação via JWT. O userId é sempre extraído do
+    token, nunca enviado no corpo da requisição. Endpoints de painel administrativo
+    e geração de relatórios globais exigem role ADMIN.
+
+servers:
+  - url: /api/v1
+    description: Base path da API no ambiente em que o serviço estiver publicado.
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Reports
+    description: Geração, listagem e busca de relatórios consolidados.
+  - name: Dashboard
+    description: Painel administrativo com estatísticas agregadas em tempo real.
+  - name: Exports
+    description: Exportação de relatórios nos formatos PDF, CSV e XLSX.
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PATHS
+# ──────────────────────────────────────────────────────────────────────────────
+paths:
+
+  # ── Reports ─────────────────────────────────────────────────────────────────
+
+  /reports:
+    post:
+      tags:
+        - Reports
+      summary: Solicitar geração de relatório
+      operationId: createReport
+      description: >
+        Solicita a geração assíncrona de um relatório. O serviço retorna
+        imediatamente com status PENDING e processa a consolidação dos dados
+        em background. Utilize GET /reports/{reportId} para verificar quando
+        o relatório estiver disponível (status READY).
+
+        Tipos disponíveis:
+
+        - `INDIVIDUAL` — desempenho de um único usuário em todas as avaliações.
+          Requer `filters.userId` (admin) ou usa o userId do JWT (usuário comum).
+
+        - `GROUP` — desempenho agregado de todos os usuários de um grupo.
+          Requer `filters.groupId`. Exclusivo para ADMIN.
+
+        - `COMPETENCY` — cobertura e níveis atingidos por competência.
+          Pode ser filtrado por `filters.competencyId`.
+
+        - `ASSESSMENT` — análise de uma avaliação específica: participação,
+          taxa de conclusão e distribuição de respostas. Requer `filters.assessmentId`.
+          Exclusivo para ADMIN.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateReportRequest'
+            example:
+              type: INDIVIDUAL
+              filters:
+                dateFrom: "2025-01-01"
+                dateTo: "2025-12-31"
+      responses:
+        '202':
+          description: Solicitação aceita — relatório sendo processado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Report'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+    get:
+      tags:
+        - Reports
+      summary: Listar relatórios
+      operationId: listReports
+      description: >
+        Usuários comuns recebem apenas seus próprios relatórios (tipo INDIVIDUAL).
+        Administradores recebem todos os relatórios gerados no sistema.
+      parameters:
+        - name: type
+          in: query
+          description: Filtrar por tipo de relatório
+          schema:
+            type: string
+            enum: [INDIVIDUAL, GROUP, COMPETENCY, ASSESSMENT]
+        - name: status
+          in: query
+          description: Filtrar por status de geração
+          schema:
+            type: string
+            enum: [PENDING, PROCESSING, READY, FAILED]
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
+      responses:
+        '200':
+          description: Lista de relatórios
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedReports'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /reports/me:
+    get:
+      tags:
+        - Reports
+      summary: Listar meus relatórios pessoais
+      operationId: listMyReports
+      description: >
+        Lista apenas os relatórios do tipo INDIVIDUAL vinculados ao userId
+        extraído do JWT. Não requer permissão de administrador.
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [PENDING, PROCESSING, READY, FAILED]
+      responses:
+        '200':
+          description: Meus relatórios
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Report'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /reports/me/progress:
+    get:
+      tags:
+        - Reports
+      summary: Meu progresso por competência
+      operationId: getMyProgress
+      description: >
+        Retorna a evolução do nível atingido por competência ao longo do tempo,
+        consolidando dados das avaliações submetidas pelo usuário autenticado.
+        Consome dados do Assessment Service e do Competency Service.
+      parameters:
+        - name: competencyId
+          in: query
+          description: Filtrar por uma competência específica
+          schema:
+            type: integer
+        - name: dateFrom
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: dateTo
+          in: query
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Progresso por competência
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CompetencyProgress'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /reports/{reportId}:
+    get:
+      tags:
+        - Reports
+      summary: Buscar relatório com dados consolidados
+      operationId: getReport
+      description: >
+        Retorna os metadados e os dados consolidados do relatório quando o
+        status for READY. Se o status for PENDING ou PROCESSING, o campo
+        `data` virá nulo.
+      parameters:
+        - name: reportId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Relatório encontrado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags:
+        - Reports
+      summary: Excluir relatório
+      operationId: deleteReport
+      description: >
+        Usuários comuns podem excluir apenas seus próprios relatórios.
+        Administradores podem excluir qualquer relatório.
+        Exportações pendentes associadas ao relatório são canceladas.
+      parameters:
+        - name: reportId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '204':
+          description: Relatório excluído com sucesso
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ── Dashboard ────────────────────────────────────────────────────────────────
+
+  /dashboard/summary:
+    get:
+      tags:
+        - Dashboard
+      summary: Resumo geral do painel administrativo
+      operationId: getDashboardSummary
+      description: >
+        Retorna métricas globais do sistema consolidadas em tempo real.
+        Exclusivo para ADMIN. Consome dados do Assessment Service e do
+        User & Group Service.
+      responses:
+        '200':
+          description: Resumo do painel
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DashboardSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /dashboard/assessments:
+    get:
+      tags:
+        - Dashboard
+      summary: Estatísticas de avaliações
+      operationId: getDashboardAssessments
+      description: >
+        Retorna taxas de participação, conclusão e distribuição de status
+        para cada avaliação publicada. Exclusivo para ADMIN.
+      parameters:
+        - name: dateFrom
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: dateTo
+          in: query
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Estatísticas por avaliação
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AssessmentStats'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /dashboard/users:
+    get:
+      tags:
+        - Dashboard
+      summary: Estatísticas de participação de usuários
+      operationId: getDashboardUsers
+      description: >
+        Retorna dados de participação por usuário e por grupo.
+        Exclusivo para ADMIN. Consome dados do User & Group Service.
+      parameters:
+        - name: groupId
+          in: query
+          description: Filtrar por grupo
+          schema:
+            type: integer
+        - name: dateFrom
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: dateTo
+          in: query
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Estatísticas de participação
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserParticipationStats'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /dashboard/competencies:
+    get:
+      tags:
+        - Dashboard
+      summary: Cobertura e desempenho por competência
+      operationId: getDashboardCompetencies
+      description: >
+        Retorna o nível médio atingido e a cobertura percentual de cada
+        competência considerando todas as respostas submetidas no período.
+        Exclusivo para ADMIN. Consome dados do Competency Service.
+      parameters:
+        - name: dateFrom
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: dateTo
+          in: query
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Desempenho por competência
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CompetencyStats'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  # ── Exports ──────────────────────────────────────────────────────────────────
+
+  /reports/{reportId}/exports:
+    post:
+      tags:
+        - Exports
+      summary: Solicitar exportação de relatório
+      operationId: createExport
+      description: >
+        Solicita a geração assíncrona de um arquivo exportado (PDF, CSV ou XLSX)
+        a partir de um relatório com status READY.
+        O endpoint retorna imediatamente com status PENDING e processa a
+        exportação em background. Utilize GET /reports/{reportId}/exports/{exportId}
+        para verificar quando o arquivo estiver disponível.
+      parameters:
+        - name: reportId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateExportRequest'
+            example:
+              format: PDF
+      responses:
+        '202':
+          description: Exportação solicitada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExportJob'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+    get:
+      tags:
+        - Exports
+      summary: Listar exportações de um relatório
+      operationId: listExports
+      parameters:
+        - name: reportId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Lista de exportações
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ExportJob'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /reports/{reportId}/exports/{exportId}:
+    get:
+      tags:
+        - Exports
+      summary: Buscar status e link de download da exportação
+      operationId: getExport
+      description: >
+        Retorna o status da exportação. Quando status for DONE, o campo
+        `downloadUrl` conterá uma URL pré-assinada com validade de 1 hora
+        para download do arquivo gerado.
+      parameters:
+        - name: reportId
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: exportId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Exportação encontrada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExportJob'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+# ──────────────────────────────────────────────────────────────────────────────
+# COMPONENTS
+# ──────────────────────────────────────────────────────────────────────────────
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  # ── Shared Responses ─────────────────────────────────────────────────────────
+  responses:
+    BadRequest:
+      description: Requisição inválida — parâmetros ausentes ou malformados.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthorized:
+      description: Token JWT ausente, inválido ou expirado.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Forbidden:
+      description: Usuário autenticado não tem permissão para acessar este recurso.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: Recurso não encontrado.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Conflict:
+      description: Estado atual do recurso não permite a operação.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  # ── Schemas ──────────────────────────────────────────────────────────────────
+  schemas:
+
+    ErrorResponse:
+      type: object
+      required:
+        - message
+      properties:
+        message:
+          type: string
+          example: Recurso não encontrado.
+        details:
+          type: string
+          nullable: true
+
+    # ── Report ─────────────────────────────────────────────────────────────────
+
+    ReportFilters:
+      type: object
+      description: >
+        Filtros aplicados na geração do relatório. Todos os campos são opcionais
+        e combinados com AND. Os IDs fazem referência a entidades externas
+        (Assessment Service, User & Group Service, Competency Service).
+      properties:
+        assessmentId:
+          type: integer
+          nullable: true
+          description: ID de uma avaliação específica (Assessment Service).
+        userId:
+          type: integer
+          nullable: true
+          description: ID de um usuário específico. Somente ADMIN pode informar userId de outro usuário.
+        groupId:
+          type: integer
+          nullable: true
+          description: ID de um grupo (User & Group Service).
+        competencyId:
+          type: integer
+          nullable: true
+          description: ID de uma competência (Competency Service).
+        dateFrom:
+          type: string
+          format: date
+          nullable: true
+          description: Data inicial do período (inclusive). Formato ISO 8601 (YYYY-MM-DD).
+          example: "2025-01-01"
+        dateTo:
+          type: string
+          format: date
+          nullable: true
+          description: Data final do período (inclusive). Formato ISO 8601 (YYYY-MM-DD).
+          example: "2025-12-31"
+
+    CreateReportRequest:
+      type: object
+      required:
+        - type
+      properties:
+        type:
+          type: string
+          enum: [INDIVIDUAL, GROUP, COMPETENCY, ASSESSMENT]
+          description: >
+            Tipo do relatório a ser gerado.
+            INDIVIDUAL e COMPETENCY podem ser solicitados por qualquer usuário autenticado.
+            GROUP e ASSESSMENT são exclusivos para ADMIN.
+        filters:
+          $ref: '#/components/schemas/ReportFilters'
+
+    Report:
+      type: object
+      required:
+        - id
+        - type
+        - status
+        - requestedByUserId
+        - filters
+        - createdAt
+      properties:
+        id:
+          type: integer
+        type:
+          type: string
+          enum: [INDIVIDUAL, GROUP, COMPETENCY, ASSESSMENT]
+        status:
+          type: string
+          enum: [PENDING, PROCESSING, READY, FAILED]
+          description: >
+            PENDING — solicitação recebida, aguardando processamento.
+            PROCESSING — dados sendo consolidados.
+            READY — relatório disponível para consulta.
+            FAILED — falha na geração; tente novamente.
+        requestedByUserId:
+          type: integer
+          description: ID do usuário que solicitou o relatório, extraído do JWT.
+        filters:
+          $ref: '#/components/schemas/ReportFilters'
+        createdAt:
+          type: string
+          format: date-time
+        readyAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Momento em que o relatório ficou disponível (status READY).
+        expiresAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Data de expiração automática do relatório (padrão 30 dias após geração).
+
+    ReportDetail:
+      allOf:
+        - $ref: '#/components/schemas/Report'
+        - type: object
+          properties:
+            data:
+              nullable: true
+              description: Dados consolidados do relatório. Nulo enquanto status não for READY.
+              oneOf:
+                - $ref: '#/components/schemas/IndividualReportData'
+                - $ref: '#/components/schemas/GroupReportData'
+                - $ref: '#/components/schemas/CompetencyReportData'
+                - $ref: '#/components/schemas/AssessmentReportData'
+
+    PaginatedReports:
+      type: object
+      required:
+        - data
+        - total
+        - page
+        - limit
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Report'
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+
+    # ── Report Data Payloads ───────────────────────────────────────────────────
+
+    IndividualReportData:
+      type: object
+      description: Dados de um relatório individual — desempenho de um único usuário.
+      required:
+        - userId
+        - totalAssessmentsCompleted
+        - competencySummaries
+        - responseHistory
+      properties:
+        userId:
+          type: integer
+          description: ID externo do usuário (User & Group Service).
+        totalAssessmentsCompleted:
+          type: integer
+        competencySummaries:
+          type: array
+          items:
+            $ref: '#/components/schemas/UserCompetencySummary'
+        responseHistory:
+          type: array
+          description: Histórico de respostas submetidas, em ordem cronológica.
+          items:
+            $ref: '#/components/schemas/ResponseHistoryEntry'
+
+    GroupReportData:
+      type: object
+      description: Dados de um relatório de grupo — desempenho agregado por grupo.
+      required:
+        - groupId
+        - totalMembers
+        - participatingMembers
+        - participationRate
+        - competencyAverages
+      properties:
+        groupId:
+          type: integer
+          description: ID externo do grupo (User & Group Service).
+        groupName:
+          type: string
+          description: Nome do grupo, obtido do User & Group Service.
+        totalMembers:
+          type: integer
+        participatingMembers:
+          type: integer
+          description: Membros que completaram ao menos uma avaliação no período.
+        participationRate:
+          type: number
+          format: float
+          description: Taxa de participação em percentual (0–100).
+          example: 75.5
+        competencyAverages:
+          type: array
+          description: Nível médio atingido por competência para o grupo.
+          items:
+            $ref: '#/components/schemas/CompetencyAverage'
+        memberBreakdown:
+          type: array
+          description: Desempenho individual de cada membro do grupo.
+          items:
+            $ref: '#/components/schemas/UserCompetencySummary'
+
+    CompetencyReportData:
+      type: object
+      description: Dados de um relatório de competência — cobertura e distribuição de níveis.
+      required:
+        - totalRespondents
+        - competencyDistributions
+      properties:
+        totalRespondents:
+          type: integer
+          description: Total de usuários únicos considerados no período.
+        competencyDistributions:
+          type: array
+          items:
+            $ref: '#/components/schemas/CompetencyLevelDistribution'
+
+    AssessmentReportData:
+      type: object
+      description: Dados de um relatório de avaliação específica.
+      required:
+        - assessmentId
+        - assessmentTitle
+        - totalStarted
+        - totalCompleted
+        - completionRate
+        - categoryBreakdowns
+      properties:
+        assessmentId:
+          type: integer
+          description: ID externo da avaliação (Assessment Service).
+        assessmentTitle:
+          type: string
+        totalStarted:
+          type: integer
+          description: Total de respostas iniciadas (IN_PROGRESS + SUBMITTED).
+        totalCompleted:
+          type: integer
+          description: Total de respostas submetidas (SUBMITTED).
+        completionRate:
+          type: number
+          format: float
+          description: Taxa de conclusão em percentual (0–100).
+          example: 88.3
+        categoryBreakdowns:
+          type: array
+          description: Distribuição de níveis por categoria da avaliação.
+          items:
+            $ref: '#/components/schemas/CategoryBreakdown'
+
+    # ── Sub-schemas de dados ──────────────────────────────────────────────────
+
+    UserCompetencySummary:
+      type: object
+      required:
+        - userId
+        - competencyId
+        - latestLevelId
+        - assessmentsCompleted
+      properties:
+        userId:
+          type: integer
+          description: ID externo do usuário (User & Group Service).
+        competencyId:
+          type: integer
+          description: ID externo da competência (Competency Service).
+        competencyName:
+          type: string
+        latestLevelId:
+          type: integer
+          description: ID externo do nível mais recente atingido (Competency Service).
+        latestLevelName:
+          type: string
+        assessmentsCompleted:
+          type: integer
+
+    ResponseHistoryEntry:
+      type: object
+      required:
+        - responseId
+        - assessmentId
+        - submittedAt
+        - categoryResults
+      properties:
+        responseId:
+          type: integer
+          description: ID externo da resposta (Assessment Service).
+        assessmentId:
+          type: integer
+          description: ID externo da avaliação (Assessment Service).
+        assessmentTitle:
+          type: string
+        submittedAt:
+          type: string
+          format: date-time
+        categoryResults:
+          type: array
+          items:
+            $ref: '#/components/schemas/CategoryResultSummary'
+
+    CategoryResultSummary:
+      type: object
+      required:
+        - categoryId
+        - competencyId
+        - levelId
+      properties:
+        categoryId:
+          type: integer
+        categoryName:
+          type: string
+        competencyId:
+          type: integer
+          description: ID externo da competência (Competency Service).
+        levelId:
+          type: integer
+          description: ID externo do nível atingido (Competency Service).
+        levelName:
+          type: string
+
+    CompetencyProgress:
+      type: object
+      description: Evolução cronológica do nível atingido em uma competência.
+      required:
+        - userId
+        - competencyId
+        - entries
+      properties:
+        userId:
+          type: integer
+        competencyId:
+          type: integer
+          description: ID externo da competência (Competency Service).
+        competencyName:
+          type: string
+        entries:
+          type: array
+          description: Entradas em ordem cronológica crescente.
+          items:
+            $ref: '#/components/schemas/ProgressEntry'
+
+    ProgressEntry:
+      type: object
+      required:
+        - responseId
+        - assessmentId
+        - levelId
+        - achievedAt
+      properties:
+        responseId:
+          type: integer
+          description: ID externo da resposta (Assessment Service).
+        assessmentId:
+          type: integer
+        levelId:
+          type: integer
+          description: ID externo do nível atingido (Competency Service).
+        levelName:
+          type: string
+        achievedAt:
+          type: string
+          format: date-time
+          description: Momento em que a resposta foi submetida.
+
+    CompetencyAverage:
+      type: object
+      required:
+        - competencyId
+        - averageLevelId
+        - averageScore
+      properties:
+        competencyId:
+          type: integer
+          description: ID externo da competência (Competency Service).
+        competencyName:
+          type: string
+        averageLevelId:
+          type: integer
+          description: Nível médio arredondado atingido pelo grupo.
+        averageScore:
+          type: number
+          format: float
+          description: Pontuação média bruta antes do mapeamento para nível.
+          example: 6.8
+
+    CompetencyLevelDistribution:
+      type: object
+      required:
+        - competencyId
+        - totalRespondents
+        - levelDistribution
+      properties:
+        competencyId:
+          type: integer
+          description: ID externo da competência (Competency Service).
+        competencyName:
+          type: string
+        totalRespondents:
+          type: integer
+        levelDistribution:
+          type: array
+          description: Distribuição percentual de respondentes por nível.
+          items:
+            $ref: '#/components/schemas/LevelDistributionEntry'
+
+    LevelDistributionEntry:
+      type: object
+      required:
+        - levelId
+        - count
+        - percentage
+      properties:
+        levelId:
+          type: integer
+          description: ID externo do nível (Competency Service).
+        levelName:
+          type: string
+        count:
+          type: integer
+          description: Número absoluto de respondentes neste nível.
+        percentage:
+          type: number
+          format: float
+          description: Percentual de respondentes neste nível (0–100).
+          example: 34.2
+
+    CategoryBreakdown:
+      type: object
+      required:
+        - categoryId
+        - competencyId
+        - totalAnswered
+        - levelDistribution
+      properties:
+        categoryId:
+          type: integer
+        categoryName:
+          type: string
+        competencyId:
+          type: integer
+          description: ID externo da competência associada à categoria (Competency Service).
+        totalAnswered:
+          type: integer
+          description: Total de respondentes que chegaram a esta categoria.
+        levelDistribution:
+          type: array
+          items:
+            $ref: '#/components/schemas/LevelDistributionEntry'
+
+    # ── Dashboard ─────────────────────────────────────────────────────────────
+
+    DashboardSummary:
+      type: object
+      required:
+        - totalUsers
+        - totalAssessments
+        - totalResponsesSubmitted
+        - averageCompletionRate
+        - responsesByMonth
+        - topCompetencies
+      properties:
+        totalUsers:
+          type: integer
+          description: Total de usuários cadastrados (User & Group Service).
+        totalAssessments:
+          type: integer
+          description: Total de avaliações publicadas (Assessment Service).
+        totalResponsesSubmitted:
+          type: integer
+          description: Total de respostas com status SUBMITTED.
+        averageCompletionRate:
+          type: number
+          format: float
+          description: Taxa média de conclusão de avaliações iniciadas (percentual).
+          example: 81.4
+        responsesByMonth:
+          type: array
+          description: Respostas submetidas por mês nos últimos 12 meses.
+          items:
+            $ref: '#/components/schemas/MonthlyCount'
+        topCompetencies:
+          type: array
+          description: As 5 competências com maior pontuação média.
+          maxItems: 5
+          items:
+            $ref: '#/components/schemas/CompetencyAverage'
+        recentResponses:
+          type: array
+          description: Últimas 10 respostas submetidas no sistema.
+          maxItems: 10
+          items:
+            $ref: '#/components/schemas/RecentResponseEntry'
+
+    MonthlyCount:
+      type: object
+      required:
+        - month
+        - count
+      properties:
+        month:
+          type: string
+          description: Mês no formato YYYY-MM.
+          example: "2025-03"
+        count:
+          type: integer
+
+    RecentResponseEntry:
+      type: object
+      required:
+        - responseId
+        - userId
+        - assessmentId
+        - submittedAt
+      properties:
+        responseId:
+          type: integer
+          description: ID externo da resposta (Assessment Service).
+        userId:
+          type: integer
+          description: ID externo do usuário (User & Group Service).
+        assessmentId:
+          type: integer
+          description: ID externo da avaliação (Assessment Service).
+        assessmentTitle:
+          type: string
+        submittedAt:
+          type: string
+          format: date-time
+
+    AssessmentStats:
+      type: object
+      required:
+        - assessmentId
+        - assessmentTitle
+        - totalStarted
+        - totalCompleted
+        - completionRate
+        - status
+      properties:
+        assessmentId:
+          type: integer
+          description: ID externo da avaliação (Assessment Service).
+        assessmentTitle:
+          type: string
+        status:
+          type: string
+          enum: [DRAFT, PUBLISHED, ARCHIVED]
+        totalStarted:
+          type: integer
+        totalCompleted:
+          type: integer
+        completionRate:
+          type: number
+          format: float
+          description: Percentual de conclusão (0–100).
+          example: 88.3
+        lastResponseAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Data da última resposta submetida para esta avaliação.
+
+    UserParticipationStats:
+      type: object
+      required:
+        - totalUsers
+        - participatingUsers
+        - participationRate
+        - groupBreakdown
+      properties:
+        totalUsers:
+          type: integer
+          description: Total de usuários considerados no filtro.
+        participatingUsers:
+          type: integer
+          description: Usuários com ao menos uma resposta submetida no período.
+        participationRate:
+          type: number
+          format: float
+          description: Taxa de participação em percentual (0–100).
+          example: 67.0
+        groupBreakdown:
+          type: array
+          description: Participação segmentada por grupo.
+          items:
+            $ref: '#/components/schemas/GroupParticipation'
+
+    GroupParticipation:
+      type: object
+      required:
+        - groupId
+        - groupName
+        - totalMembers
+        - participatingMembers
+        - participationRate
+      properties:
+        groupId:
+          type: integer
+          description: ID externo do grupo (User & Group Service).
+        groupName:
+          type: string
+        totalMembers:
+          type: integer
+        participatingMembers:
+          type: integer
+        participationRate:
+          type: number
+          format: float
+          example: 72.5
+
+    CompetencyStats:
+      type: object
+      required:
+        - competencyId
+        - totalRespondents
+        - averageLevelId
+        - averageScore
+        - levelDistribution
+      properties:
+        competencyId:
+          type: integer
+          description: ID externo da competência (Competency Service).
+        competencyName:
+          type: string
+        totalRespondents:
+          type: integer
+        averageLevelId:
+          type: integer
+          description: Nível médio arredondado atingido no período.
+        averageScore:
+          type: number
+          format: float
+          example: 7.1
+        levelDistribution:
+          type: array
+          items:
+            $ref: '#/components/schemas/LevelDistributionEntry'
+
+    # ── Exports ──────────────────────────────────────────────────────────────
+
+    CreateExportRequest:
+      type: object
+      required:
+        - format
+      properties:
+        format:
+          type: string
+          enum: [PDF, CSV, XLSX]
+          description: Formato do arquivo a ser gerado.
+
+    ExportJob:
+      type: object
+      required:
+        - id
+        - reportId
+        - format
+        - status
+        - createdAt
+      properties:
+        id:
+          type: integer
+        reportId:
+          type: integer
+        format:
+          type: string
+          enum: [PDF, CSV, XLSX]
+        status:
+          type: string
+          enum: [PENDING, PROCESSING, DONE, FAILED]
+          description: >
+            PENDING — aguardando processamento.
+            PROCESSING — arquivo sendo gerado.
+            DONE — arquivo disponível para download via downloadUrl.
+            FAILED — falha na geração.
+        downloadUrl:
+          type: string
+          nullable: true
+          description: >
+            URL pré-assinada para download do arquivo. Disponível apenas quando
+            status for DONE. Validade de 1 hora a partir da geração.
+          example: "https://storage.example.com/reports/export_42.pdf?token=..."
+        expiresAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Validade da URL de download.
+        createdAt:
+          type: string
+          format: date-time
+        readyAt:
+          type: string
+          format: date-time
+          nullable: true
