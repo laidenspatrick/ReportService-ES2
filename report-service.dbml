@@ -1,0 +1,112 @@
+// Report Service — Modelo de Dados (DBML)
+// Ferramenta de visualização: https://dbdiagram.io
+//
+// Nota: Este serviço é um consumidor de dados. Entidades marcadas com
+// "// [externo]" não são persistidas aqui — são referenciadas por ID
+// e consultadas nos serviços de origem via chamada HTTP.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Referências externas (não persistidas neste serviço)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// [externo] Assessment Service
+// Table assessment_responses_ext {
+//   id integer [pk]  // Assessment Service
+// }
+
+// [externo] Competency Service
+// Table competencies_ext {
+//   id integer [pk]
+// }
+
+// [externo] User & Group Service
+// Table users_ext {
+//   id integer [pk]
+// }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Entidades locais do Report Service
+// ─────────────────────────────────────────────────────────────────────────────
+
+Table reports {
+  id                  integer     [pk, increment, note: 'PK']
+  type                report_type [not null, note: 'Tipo do relatório']
+  status              report_status [not null, default: 'PENDING']
+  requested_by_user_id integer    [not null, note: 'ID externo do usuário solicitante (User & Group Service). Extraído do JWT.']
+
+  // Filtros serializados como JSONB
+  filter_assessment_id  integer   [null, note: 'Filtro: ID externo de avaliação (Assessment Service)']
+  filter_user_id        integer   [null, note: 'Filtro: ID externo de usuário (User & Group Service)']
+  filter_group_id       integer   [null, note: 'Filtro: ID externo de grupo (User & Group Service)']
+  filter_competency_id  integer   [null, note: 'Filtro: ID externo de competência (Competency Service)']
+  filter_date_from      date      [null, note: 'Filtro: data inicial do período (inclusive)']
+  filter_date_to        date      [null, note: 'Filtro: data final do período (inclusive)']
+
+  created_at          timestamptz [not null, default: 'now()']
+  ready_at            timestamptz [null, note: 'Preenchido quando status muda para READY']
+  expires_at          timestamptz [null, note: 'Expiração automática (padrão: 30 dias após ready_at)']
+
+  note: 'Metadados de um relatório solicitado. Os dados consolidados ficam em report_snapshots.'
+}
+
+Table report_snapshots {
+  id         integer     [pk, increment]
+  report_id  integer     [not null, ref: > reports.id, note: 'FK → reports']
+  data       jsonb       [not null, note: 'Payload consolidado do relatório (IndividualReportData | GroupReportData | CompetencyReportData | AssessmentReportData)']
+  generated_at timestamptz [not null, default: 'now()']
+
+  note: 'Snapshot dos dados consolidados. Um relatório pode ter no máximo um snapshot ativo.'
+
+  indexes {
+    report_id [unique, name: 'uq_snapshot_report']
+  }
+}
+
+Table export_jobs {
+  id           integer      [pk, increment]
+  report_id    integer      [not null, ref: > reports.id, note: 'FK → reports']
+  format       export_format [not null]
+  status       export_status [not null, default: 'PENDING']
+  download_url varchar(2048) [null, note: 'URL pré-assinada para download. Preenchida quando status = DONE.']
+  expires_at   timestamptz  [null, note: 'Validade da URL de download (1 hora após geração)']
+  created_at   timestamptz  [not null, default: 'now()']
+  ready_at     timestamptz  [null]
+
+  indexes {
+    report_id [name: 'idx_exports_report']
+    (report_id, format) [name: 'idx_exports_report_format']
+  }
+
+  note: 'Job de exportação de um relatório em arquivo (PDF, CSV ou XLSX).'
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Enums
+// ─────────────────────────────────────────────────────────────────────────────
+
+Enum report_type {
+  INDIVIDUAL  [note: 'Desempenho de um único usuário em todas as avaliações']
+  GROUP       [note: 'Desempenho agregado de todos os membros de um grupo']
+  COMPETENCY  [note: 'Cobertura e distribuição de níveis por competência']
+  ASSESSMENT  [note: 'Análise de uma avaliação específica (participação, conclusão, distribuição)']
+}
+
+Enum report_status {
+  PENDING     [note: 'Solicitação recebida, aguardando processamento']
+  PROCESSING  [note: 'Dados sendo consolidados dos serviços externos']
+  READY       [note: 'Relatório disponível — snapshot gerado']
+  FAILED      [note: 'Falha na geração; cliente pode re-solicitar']
+}
+
+Enum export_format {
+  PDF
+  CSV
+  XLSX
+}
+
+Enum export_status {
+  PENDING    [note: 'Aguardando processamento']
+  PROCESSING [note: 'Arquivo sendo gerado']
+  DONE       [note: 'Arquivo disponível via downloadUrl']
+  FAILED     [note: 'Falha na geração do arquivo']
+}
